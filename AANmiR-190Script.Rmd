@@ -1,0 +1,581 @@
+---
+title: "Ariana Nagainis mir-190 project scRNAseq"
+output: html_notebook
+---
+
+
+```{r load libraries}
+library(Seurat)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(SeuratData)
+```
+
+```{r load initial files}
+#List of files to load into the environment.  Use this to reload the files into the environment after they have been created using the chunk below.  Skip this chunk the first time through the script.
+#clear environment: rm(list=ls())
+control <- readRDS("control.rds")
+mir190 <- readRDS("mir190.rds")
+```
+
+
+```{r make Seurat objects}
+#Run this the first time through the script.  After that, just load the data using the chunk above.
+
+#WT1
+seur.data <- Read10X(data.dir = "/Users/ariananagainis/Desktop/MIR190_scRNAseq/OReR")
+control <- CreateSeuratObject(counts = seur.data, project = "control", min.cells = 3, min.features = 200)
+control
+
+#check quailty of data
+control[["percent.mt"]] <- PercentageFeatureSet(control, pattern = "mt:")
+VlnPlot(control, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+control -> control_orig
+
+control <- subset(control_orig, subset = nFeature_RNA > 500 & nFeature_RNA < 3000 & nCount_RNA > 1000 & nCount_RNA < 25000 & percent.mt < 10)
+control
+
+#MIR190
+
+seur.data <- Read10X("/Users/ariananagainis/Desktop/MIR190_scRNAseq/MIR190")
+mir190 <- CreateSeuratObject(counts = seur.data, project = "miR-190", min.cells = 3, min.features = 200)
+mir190
+
+mir190[["percent.mt"]] <- PercentageFeatureSet(mir190, pattern = "mt:")
+VlnPlot(mir190, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+mir190_orig <- mir190
+
+mir190 <- subset(mir190_orig, subset = nFeature_RNA > 500 & nFeature_RNA < 3800 & nCount_RNA > 1000 & nCount_RNA < 25000 & percent.mt < 10)
+mir190
+
+#renaming datasets
+control@meta.data[, "dataset"] <- "control"
+mir190@meta.data[, "dataset"] <- "mir190"
+
+
+control <- RenameCells(control, add.cell.id = "control")
+mir190 <- RenameCells(mir190, add.cell.id = "mir190")
+
+#to see median of genes per cell
+#genes_per_cell <- Matrix::colSums(control)
+#hist(log10(genes_per_cell+1), main='genes per cell', col='wheat')
+#genes_per_cell <- Matrix::colSums(cmir190)
+#hist(log10(genes_per_cell+1), main='genes per cell', col='wheat')
+```
+
+```{r saving datasets}
+#saving datasets
+saveRDS(control, "control.rds")
+saveRDS(mir190, "mir190.rds")
+```
+
+```{R Merge Datasets Through Integration method of SCT}
+combined <- merge(x = control, y = c(mir190),  merge.data = T, project = "combined_miR-190")
+
+#rm(list=setdiff(ls(), "combined"))
+DefaultAssay(combined) <- "RNA"
+ifnb.list <- SplitObject(combined, split.by = "dataset")
+
+#r preprocessing to integrate data
+ifnb.list <- lapply(X = ifnb.list,FUN = SCTransform)
+features <- SelectIntegrationFeatures(object.list = ifnb.list, nfeatures = 2000) #2000 features is common
+ifnb.list <- PrepSCTIntegration(object.list = ifnb.list, anchor.features = features)
+saveRDS(ifnb.list, "ifnb.rds")
+
+#r find integration anchors
+combined.anchors <- FindIntegrationAnchors(object.list = ifnb.list, dims = 1:20)
+#combined.anchors <- FindIntegrationAnchors(object.list = ifnb.list, normalization.method = "SCT", anchor.features = features)
+#saveRDS(combined.anchors, "combined.anchors.rds")
+
+
+#r integrate data
+#run this step on wynton - dont have to since dataset small and few 
+combined_sct <- IntegrateData(anchorset = combined.anchors, normalization.method = 'SCT')
+
+## Perform an integrated analysis
+#r clustering
+# specify that we will perform downstream analysis on the corrected data
+# note that the original unmodified data still resides in the 'RNA' assay
+
+DefaultAssay(combined_sct) <- "integrated"
+#Run the standard workflow for visualization and clustering
+combined_sct <- ScaleData(combined_sct, verbose = FALSE)
+combined_sct <- RunPCA(combined_sct, npcs = 30, verbose = FALSE)
+#combined_sct <- JackStraw(combined_sct, num.replicate = 100)
+#ElbowPlot(combined_sct)
+combined_sct <- RunUMAP(combined_sct, reduction = "pca", dims = 1:20)
+combined_sct <- FindNeighbors(combined_sct, reduction = "pca", dims = 1:20)
+combined_sct <- FindClusters(combined_sct, resolution = 0.08)
+
+#r UMAP of combined data
+# Visualization
+p1 <- DimPlot(combined_sct, reduction = "umap", group.by = "dataset")
+p2 <- DimPlot(combined_sct, reduction = "umap", label = TRUE, repel = TRUE)
+p3 <- p1 + p2
+
+#type only p3 to see the combined dataset
+p3
+ggsave(filename = "UMAP_combined.jpg", height = 7, width = 12, plot = p3, quality = 50)
+
+```
+
+```{r}
+#r split.dim
+#naming main UMAP 
+
+new.cluster.ids <- c("Neurons", "Undifferentiated Neurons","Peptidergic  Neurons","Neural Progenitor Cells", "Glial Cells", "Kenyon cells", "Astrocytes")
+
+names(new.cluster.ids) <- levels(combined_sct)
+combined_sct <- RenameIdents(combined_sct, new.cluster.ids)
+DimPlot(combined_sct, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+mainUMAPDoHeatMap = DoHeatmap(combined_sct, features = c("Gad1", "kn", "acj6","hdc", "Thor", "twit","dimm", "ase", "N", "dpn", "mira", "D", "grh","hoe1", "wrapper", "CG6126", "sNPF", "Nep1", "prt", "pros", "ey", "repo", "Gs2", "alrm", "Gat", "e", "wun2", "Eaat1")) + NoLegend()
+
+mainUMAPDotPlot = DotPlot(combined_sct, features = c("Gad1", "kn", "acj6","hdc", "Thor", "twit","dimm", "ase", "N", "dpn", "mira", "D", "grh","hoe1", "wrapper", "CG6126", "sNPF", "Nep1", "prt", "pros", "ey", "repo", "Gs2", "alrm", "Gat", "e", "wun2", "Eaat1")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+simmainUMAPDotPlot = DotPlot(combined_sct, features = c( "Gad1","hdc","twit", "dpn", "hoe1", "pros", "alrm")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+ggsave(filename = "mainUMAPDotPlot.jpg", height = 7, width = 12, plot = mainUMAPDotPlot, quality = 50)
+
+ggsave(filename = "mainUMAPDoHeatMap.jpg", height = 7, width = 12, plot = mainUMAPDoHeatMap, quality = 50)
+
+#main UMAP plot
+#mainUMAPDoHeatMap
+#simplified main DotPlot
+#simmainUMAPDotPlot
+#large marker dotplot
+#mainUMAPDotPlot
+
+```
+
+```{r}
+# to find markers that are conserved between groups
+nk.markers <- FindConservedMarkers(combined_sct, ident.1 = 0, grouping.var = "dataset", verbose = FALSE)
+head(nk.markers)
+```
+
+```{r}
+#Determine Cluster of Interest (Identity of Cluster)
+#Make Dot and Feature Plots for markers you are interested in that are unique to the cells you are interested in
+
+DefaultAssay(combined_sct) <- "integrated"
+DotPlot(combined_sct.8, features = c("VAChT", "VGlut", "Gad1","Vmat", "ChAT", "N", "dpn", "D", "grh", "repo", "Gs2", "CAH1", "SPARC", "Sod3", "Syb", "ey", "prt", "pros", "alrm", "Nplp1", "dimm", "ase", "hdc", "Thor"), split.by = "dataset", cols = c("blue", "red"))
+ggsave("Combined_sctDotPlot.jpg", width=20, height=10, units = "in")
+
+#FeaturePlot(combined_sct, features = c("repo", "N", "dpn","ChAT", "elav"), reduction = "umap", split.by = "dataset")
+#DoHeatmap(combined_sct, features = c("repo", "N", "dpn","ChAT", "pros", "mira")) + NoLegend()
+#VlnPlot(combined_sct, features = c("repo", "N", "dpn","ChAT"), split.by = "dataset", split.plot = TRUE)
+#DotPlot(combined_sct, features = c("Fas2", "sNPF", "Nep1","prt", "pros", "Dop2R", "VAChT", "ase", "N"), split.by = "dataset", cols = c("blue", "red"))
+```
+
+```{r define WT}
+#this just adds a "WT" tag to the cells from the wildtype clusters and generates a plot to show where they are
+WT_cells <- WhichCells(ifnb.list$control1)
+WT_cells <- append(WT_cells, WhichCells(ifnb.list$control2))
+
+DimPlot(combined, cells.highlight = WT_cells, pt.size = 1) + 
+scale_color_manual(labels = c("mutant", "WT"), values = c("magenta", "#009E73"))
+```
+
+```{r}
+#SubCluster of Neurons - Cluster of Interest based on Cluster Analysis Chunk
+
+#this line of code is needed (present in VST integration but not in SCT)
+all.genes <- rownames(combined)
+
+#Cluster Neurons
+neurons <- subset(combined_sct, idents = "Neurons")
+UMAPPlot(neurons)
+
+DefaultAssay(neurons) <- "integrated"
+neurons <- FindVariableFeatures(neurons, selection.method = "vst", nfeatures = 2000)
+neurons <- ScaleData(neurons, features = all.genes)
+neurons <- RunPCA(neurons)
+neurons <- FindNeighbors(neurons)
+neurons <- FindClusters(neurons, resolution = 0.3)
+UMAPPlot(neurons, label = TRUE)
+
+nk.markers <- FindConservedMarkers(neurons, ident.1 = 0, grouping.var = "dataset", verbose = FALSE)
+head(nk.markers)
+
+new.cluster.ids.neurons <- c("Cholinergic/Glutamatergic Neurons", "Neuromeres (VNC Neurons)","GABAergic Cells","Unannotated Cells", "Olfactory Projection (OPN)", "Monoaminergic neurons", "Glial-like Neurons", "Histamine neurons (HA)")
+
+names(new.cluster.ids.neurons) <- levels(neurons)
+neurons <- RenameIdents(neurons, new.cluster.ids.neurons)
+DimPlot(neurons, reduction = "umap", label = TRUE, label.size = 3)
+
+neuronDotPlot = DotPlot(neurons, features = c("hdc","Gs2","alrm","Gat","Eaat1","repo","e","wun2","Vmat", "kn","acj6", "C15", "abd-A","Ubx","VAChT","VGlut","Gad1","ChAT")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+neuronDotPlot
+
+#Cholinergic/Glutamateric Neurons
+cgn <- subset(neurons, idents = "Cholinergic/Glutamatergic Neurons")
+DefaultAssay(cgn) <- "integrated"
+cgn <- FindVariableFeatures(cgn, selection.method = "vst", nfeatures = 2000)
+cgn <- ScaleData(cgn, features = all.genes)
+cgn <- RunPCA(cgn)
+cgn <- FindNeighbors(cgn)
+cgn <- FindClusters(cgn, resolution = 0.5)
+#UMAPPlot(cgn, label = TRUE)
+
+#GABAergic Neurons
+gaba <- subset(neurons, idents = "GABAergic Cells")
+DefaultAssay(gaba) <- "integrated"
+gaba <- FindVariableFeatures(gaba, selection.method = "vst", nfeatures = 2000)
+gaba <- ScaleData(gaba, features = all.genes)
+gaba <- RunPCA(gaba)
+gaba <- FindNeighbors(gaba)
+gaba <- FindClusters(gaba, resolution = 0.2)
+#UMAPPlot(gaba, label = TRUE)
+
+#Neuromeres (VNC Neurons)
+neuromeres <- subset(neurons, idents = "Neuromeres (VNC Neurons)")
+DefaultAssay(neuromeres) <- "integrated"
+neuromeres <- FindVariableFeatures(neuromeres, selection.method = "vst", nfeatures = 2000)
+neuromeres <- ScaleData(neuromeres, features = all.genes)
+neuromeres <- RunPCA(neuromeres)
+neuromeres <- FindNeighbors(neuromeres)
+neuromeres <- FindClusters(neuromeres, resolution = 0.3)
+#UMAPPlot(neuromeres, label = TRUE)
+
+#DotPlot(neurons, features = c("Antp", "Ubx", "abd-A", "Abd-B"))
+
+#Monoaminergic neurons
+mono <- subset(neurons, idents = "Monoaminergic neurons")
+DefaultAssay(mono) <- "integrated"
+mono <- FindVariableFeatures(mono, selection.method = "vst", nfeatures = 2000)
+mono <- ScaleData(mono, features = all.genes)
+mono <- RunPCA(mono)
+mono <- FindNeighbors(mono)
+mono <- FindClusters(mono, resolution = 0.3)
+#UMAPPlot(mono, label = TRUE)
+
+#Monoaminergic neurons subclustering
+new.cluster.ids.mono <- c("Dopaminergic Neurons", "Serotonergic Neurons","Octopaminergic-tyrainergic Neurons")
+names(new.cluster.ids.mono) <- levels(mono)
+mono <- RenameIdents(mono, new.cluster.ids.mono)
+#DimPlot(mono, reduction = "umap", label = TRUE, label.size = 3)
+#DimPlot(mono, reduction = "umap")
+#DotPlot(mono, features = c("Tdc2", "SerT", "ple"))
+
+monoFeaturePlot = FeaturePlot (mono, features = c("Tdc2", "SerT", "ple"))
+#monoFeaturePlot
+
+dopa <- subset(mono, idents = "Dopaminergic Neurons")
+#DimPlot(dopa, reduction = "umap", split.by = "dataset")
+
+ser <- subset(mono, idents = "Serotonergic Neurons")
+#DimPlot(ser, reduction = "umap", split.by = "dataset")
+
+oct <- subset(mono, idents = "Octopaminergic-tyrainergic Neurons")
+#DimPlot(oct, reduction = "umap", split.by = "dataset")
+
+#Histamine Neurons - there forms two subclusters, but for simplicity sake we will only do HA overall
+HA <- subset(neurons, idents = "Histamine neurons (HA)")
+DefaultAssay(HA) <- "integrated"
+HA <- FindVariableFeatures(HA, selection.method = "vst", nfeatures = 2000)
+HA <- ScaleData(HA, features = all.genes)
+HA <- RunPCA(HA)
+HA <- FindNeighbors(HA)
+HA <- FindClusters(HA, resolution = 0.3)
+#UMAPPlot(HA, label = TRUE)
+
+#Olfactory Projection (OPN)
+opn <- subset(neurons, idents = "Olfactory Projection (OPN)")
+DefaultAssay(opn) <- "integrated"
+UMAPPlot(opn)
+opn <- FindVariableFeatures(opn, selection.method = "vst", nfeatures = 2000)
+opn <- ScaleData(opn, features = all.genes)
+opn <- RunPCA(opn)
+opn <- FindNeighbors(opn)
+opn <- FindClusters(opn, resolution = 0.3)
+#UMAPPlot(opn, label = TRUE, split.by = "dataset")
+
+#Glial-like Neurons subcluster 
+Glike_N <- subset(neurons, idents = "Glial-like Neurons")
+DefaultAssay(Glike_N) <- "integrated"
+UMAPPlot(Glike_N)
+Glike_N <- FindVariableFeatures(Glike_N, selection.method = "vst", nfeatures = 2000)
+Glike_N <- ScaleData(Glike_N, features = all.genes)
+Glike_N <- RunPCA(Glike_N)
+Glike_N <- FindNeighbors(Glike_N)
+Glike_N <- FindClusters(Glike_N, resolution = 0.3)
+#UMAPPlot(Glike_N, label = TRUE)
+
+#mystery cluster
+unknown <- subset(neurons, idents = "Unannotated Cells")
+DefaultAssay(unknown) <- "integrated"
+unknown <- FindVariableFeatures(unknown, selection.method = "vst", nfeatures = 2000)
+unknown <- ScaleData(unknown, features = all.genes)
+unknown <- RunPCA(unknown)
+unknown <- FindNeighbors(unknown)
+unknown <- FindClusters(unknown, resolution = 0.3)
+UMAPunknown = UMAPPlot(unknown, label = TRUE)
+#UMAPunknown
+
+
+#3 clusters form for unknown: cluster 1 distinctly has GABAgernic Cells similarities sharing Gad1 and CG14989
+unknown_idnt = FindMarkers(neurons, ident.1 = "Unannotated Cells", ident.2 = "GABAergic Cells")
+#unknown_idnt %>% top_n(10, p_val)
+#differential gene expression analysis shows GC43795, CG33143, Faa, Chd64, ap top 5 differenially expressed 
+#sprecher paper claims "CG43795; an uncharacterized GPCR predicted to have Glutamate/GABA receptor activity (Agrawal, 2013)"
+
+```
+
+``` {r} 
+#Peptidergic  Neurons Cluster
+pep <- subset(combined_sct, idents = "Peptidergic  Neurons")
+DefaultAssay(pep) <- "integrated"
+UMAPPlot(pep)
+pep <- FindVariableFeatures(pep, selection.method = "vst", nfeatures = 2000)
+pep <- ScaleData(pep, features = all.genes)
+pep <- RunPCA(pep)
+pep <- FindNeighbors(pep)
+pep <- FindClusters(pep, resolution = 0.1)
+UMAPPlot(pep, label = TRUE)
+
+FeaturePlot(pep, c("twit", "dimm", "Nplp1", "eya", "ap"))
+
+#Glial Cells
+glial <- subset(combined_sct, idents = "Glial Cells")
+UMAPPlot(glial)
+
+DefaultAssay(glial) <- "integrated"
+glial <- FindVariableFeatures(glial, selection.method = "vst", nfeatures = 2000)
+glial <- ScaleData(glial, features = all.genes)
+glial <- RunPCA(glial)
+glial <- FindNeighbors(glial)
+glial <- FindClusters(glial, resolution = 0.05)
+UMAPPlot(glial, label = TRUE)
+
+DotPlot(glial, features = c("vkg", "Arc1", "e", "wun2", "wrapper", "Gs2", "Gat")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+new.cluster.ids.glial <- c("0", "1","Cortex Glial Cells","3", "4")
+
+names(new.cluster.ids.glial) <- levels(glial)
+glial <- RenameIdents(glial, new.cluster.ids.glial)
+DimPlot(glial, reduction = "umap", label = TRUE, label.size = 3)
+
+DotPlot(glial, features = c("Vmat","GLaz","zyd","ClC-a", "axo", "CG9657", "wun2", "wrapper", "Gs2", "Gat", "SPARC", "Mdr65")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+ 
+#dot plots in place to compare expression (notes on google doc)
+DotPlot(combined_sct, split.by ="dataset", features = c("hoe1","wrapper", "Gs2","alrm","Gat","Eaat1","repo","e","wun2")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+DotPlot(neurons, split.by ="dataset", features = c("hoe1","wrapper", "Gs2","alrm","Gat","Eaat1","repo","e","wun2")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+DotPlot(glial, split.by ="dataset", features = c("hoe1","wrapper", "Gs2","alrm","Gat","Eaat1","repo","e","wun2")) + theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+#subclustering of glial cells
+#glial0 <- subset(glial, idents = "0")
+#DimPlot(glial0, reduction = "umap", split.by = "dataset")
+
+#glial1 <- subset(glial, idents = "1")
+#DimPlot(glial1, reduction = "umap", split.by = "dataset")
+
+#cortex <- subset(glial, idents = "2")
+#DimPlot(cortex, reduction = "umap", split.by = "dataset")
+
+#glial3 <- subset(glial, idents = "3")
+#DimPlot(glial3, reduction = "umap", split.by = "dataset")
+
+#glial4 <- subset(glial, idents = "4")
+#DimPlot(glial4, reduction = "umap", split.by = "dataset")
+
+#Neural Progenitor Cells
+NPC <- subset(combined_sct, idents = "Neural Progenitor Cells")
+DefaultAssay(NPC) <- "integrated"
+UMAPPlot(NPC)
+
+NPC <- FindVariableFeatures(NPC, selection.method = "vst", nfeatures = 2000)
+NPC <- ScaleData(NPC, features = all.genes)
+NPC <- RunPCA(NPC)
+NPC <- FindNeighbors(NPC)
+NPC <- FindClusters(NPC, resolution = 0.3)
+UMAPPlot(NPC, label = TRUE)
+
+#NPC0 <- subset(NPC, idents = "0")
+#DimPlot(NPC0, reduction = "umap", split.by = "dataset")
+
+#NPC1 <- subset(NPC, idents = "1")
+#DimPlot(NPC1, reduction = "umap", split.by = "dataset")
+
+#NPC2 <- subset(NPC, idents = "2")
+#DimPlot(NPC2, reduction = "umap", split.by = "dataset")
+
+#astrocytes 
+astrocytes <- subset(combined_sct, idents = "Astrocytes")
+DefaultAssay(astrocytes) <- "integrated"
+UMAPPlot(astrocytes)
+astrocytes <- FindVariableFeatures(astrocytes, selection.method = "vst", nfeatures = 2000)
+astrocytes <- ScaleData(astrocytes, features = all.genes)
+astrocytes <- RunPCA(astrocytes)
+astrocytes <- FindNeighbors(astrocytes)
+astrocytes <- FindClusters(astrocytes, resolution = 0.3)
+UMAPPlot(astrocytes, label = TRUE)
+
+#Undifferentiated Neurons
+undif <- subset(combined_sct, idents = "Undifferentiated Neurons")
+DefaultAssay(undif) <- "integrated"
+UMAPPlot(undif)
+
+undif <- FindVariableFeatures(undif, selection.method = "vst", nfeatures = 2000)
+undif <- ScaleData(undif, features = all.genes)
+undif <- RunPCA(undif)
+undif <- FindNeighbors(undif)
+undif <- FindClusters(undif, resolution = 0.3)
+UMAPPlot(undif, label = TRUE)
+
+#kenyon cells (mushroom body)
+kc <- subset(combined_sct, idents = "Kenyon cells")
+DefaultAssay(kc) <- "integrated"
+UMAPPlot(kc)
+
+kc <- FindVariableFeatures(kc, selection.method = "vst", nfeatures = 2000)
+kc <- ScaleData(kc, features = all.genes)
+kc <- RunPCA(kc)
+kc <- FindNeighbors(kc)
+kc <- FindClusters(kc, resolution = 0.3)
+UMAPPlot(kc, label = TRUE)
+
+combined_sct.list <- SplitObject(combined_sct, split.by = "dataset")
+
+kc_diff_markers <- subset(combined_sct, idents = "Kenyon cells")
+kc_diff_markers <- SetIdent(kc_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+kc_diff_markers <- SetIdent(kc_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+kc_markers_asterisk <- FindMarkers(kc_diff_markers, ident.1 = "mir190", ident.2 = "control")
+#kc_markers_asterisk%>%top_n(10,p_val)
+
+#kc01_markers_asterisk <- FindMarkers(kc, ident.1 = "0", ident.2 = "1")
+#kc01_markers_asterisk%>%top_n(10,p_val)
+
+#kc12_markers_asterisk <- FindMarkers(kc, ident.1 = "1", ident.2 = "2")
+#kc12_markers_asterisk%>%top_n(10,p_val)
+
+#kc02_markers_asterisk <- FindMarkers(kc, ident.1 = "0", ident.2 = "2")
+#kc02_markers_asterisk%>%top_n(10,p_val)
+
+npc_diff_markers <- subset(combined_sct, idents = "Neural Progenitor Cells")
+npc_diff_markers <- SetIdent(npc_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+npc_diff_markers <- SetIdent(npc_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+npc_markers_asterisk <- FindMarkers(npc_diff_markers, ident.1 = "mir190", ident.2 = "control")
+#npc_markers_asterisk%>%top_n(10,p_val)
+```
+
+```{r}
+
+```
+
+```{r} 
+```
+
+```{r}
+```
+
+```{r}
+#RunFindMarkers to see Differentially Expressed Genes
+
+combined_sct.list <- SplitObject(combined_sct, split.by = "dataset")
+
+neurons <- subset(combined_sct, idents = "Neurons") #by cell type, datasets still combined. check capitalization
+
+WhichCells(combined_sct, idents = "Neurons") #not sure about it
+
+
+neurons <- SetIdent(neurons, cells = WhichCells(combined_sct.list$control), "control")
+neurons <- SetIdent(neurons, cells = WhichCells(combined_sct.list$mir190), "mir190")
+
+
+neurons_markers_asterisk <- FindMarkers(neurons, ident.1 = "mir190", ident.2 = "control")
+
+
+astro <- subset(combined_sct, idents = "Astrocytes")
+Idents(astro) <- "mIR-190"
+avg.astro <- log1p(AverageExpression(astro, verbose = FALSE)$RNA)
+avg.astro$gene <- rownames(avg.astro)
+
+int <- subset(neurons, idents = "Asto-neuron")
+Idents(int) <- "mIR-190"
+avg.int <- log1p(AverageExpression(int, verbose = FALSE)$RNA)
+avg.int$gene <- rownames(avg.int)
+
+avg.astro <- as.data.frame(avg.astro)
+avg.int <- as.data.frame(avg.int)
+
+genes.to.label = c( "Gs2", "alrm", "Gat", "e", "wun2", "Eaat1")
+p1 <- ggplot(avg.astro, aes(CONTROL, MIR190)) + geom_point() + ggtitle("astrocytes")
+p1 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE)
+p2 <- ggplot(avg.int, aes(control, mir190)) + geom_point() + ggtitle("int")
+p2 <- LabelPoints(plot = p2, points = genes.to.label, repel = TRUE)
+plot_grid(p1, p2)
+```
+```
+
+```{r}
+#RunFindAllMarkers
+
+combined_sct.list <- SplitObject(combined_sct, split.by = "dataset")
+
+all_diff_markers <- subset(combined_sct)
+all_diff_markers <- SetIdent(all_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+all_diff_markers <- SetIdent(all_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+all_markers_asterisk <- FindMarkers(all_diff_markers, ident.1 = "mir190", ident.2 = "control")
+all_markers_asterisk
+
+astro_diff_markers <- subset(astrocytes)
+astro_diff_markers <- SetIdent(astro_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+astro_diff_markers <- SetIdent(astro_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+astro_markers_asterisk <- FindMarkers(astro_diff_markers, ident.1 = "mir190", ident.2 = "control")
+df_astro <- data.frame(astro_markers_asterisk)
+#astro_markers_asterisk
+
+kc_diff_markers <- subset(kc)
+kc_diff_markers <- SetIdent(kc_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+kc_diff_markers <- SetIdent(kc_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+kc_markers_asterisk <- FindMarkers(kc_diff_markers, ident.1 = "mir190", ident.2 = "control")
+kc_markers_asterisk
+
+pep_diff_markers <- subset(pep)
+pep_diff_markers <- SetIdent(pep_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+pep_diff_markers <- SetIdent(pep_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+pep_markers_asterisk <- FindMarkers(pep_diff_markers, ident.1 = "mir190", ident.2 = "control")
+pep_markers_asterisk
+
+neurons_diff_markers <- subset(neurons)
+neurons_diff_markers <- SetIdent(neurons_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+neurons_diff_markers <- SetIdent(neurons_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+neurons_markers_asterisk <- FindMarkers(neurons_diff_markers, ident.1 = "mir190", ident.2 = "control")
+neurons_markers_asterisk
+
+df_neurons <- data.frame(neurons_markers_asterisk)
+#print(df_neurons)
+
+glial_diff_markers <- subset(glial)
+glial_diff_markers <- SetIdent(glial_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+glial_diff_markers <- SetIdent(glial_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+glial_markers_asterisk <- FindMarkers(glial_diff_markers, ident.1 = "mir190", ident.2 = "control")
+glial_markers_asterisk
+
+undif_diff_markers <- subset(undif)
+undif_diff_markers <- SetIdent(undif_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+undif_diff_markers <- SetIdent(undif_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+undif_markers_asterisk <- FindMarkers(undif_diff_markers, ident.1 = "mir190", ident.2 = "control")
+undif_markers_asterisk
+
+
+NPC_diff_markers <- subset(NPC)
+NPC_diff_markers <- SetIdent(NPC_diff_markers, cells = WhichCells(combined_sct.list$control), "control")
+NPC_diff_markers <- SetIdent(NPC_diff_markers, cells = WhichCells(combined_sct.list$mir190), "mir190")
+NPC_markers_asterisk <- FindMarkers(NPC_diff_markers, ident.1 = "mir190", ident.2 = "control")
+df_NPC <- data.frame(NPC_markers_asterisk)
+
+NPC_markers_asterisk
+
+
+#combined_sct.8.markers <- FindAllMarkers(combined_sct.8)
+#write.csv(combined_sct.8.markers, "Combined_sct.8.allmarkers.csv")
+```
+
+
+
